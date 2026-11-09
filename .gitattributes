@@ -1,0 +1,4 @@
+# sh and zsh stop at a CR, and Git for Windows checks text out with CRLF by default.
+crapper text eol=lf
+uml text eol=lf
+*.cmd text eol=crlf

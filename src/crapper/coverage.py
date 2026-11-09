@@ -1,8 +1,9 @@
 """Load Cloverage, LCOV, JaCoCo, and Go coverage profiles.
 
 Clojure prefers Cloverage's per-line form counts, then LCOV. Java uses JaCoCo
-instruction counters. Go uses statement profiles. LCOV scores a function by
-its BRDA branch records when it has any, and by line hits otherwise.
+instruction counters. Go uses statement profiles. LCOV scores a function its
+FNDA record says never ran at 0%, then by its BRDA branch records when it has
+any, and by line hits otherwise.
 `percent_for` returns None when the file is absent; analysis turns that into 0%.
 """
 
@@ -21,6 +22,9 @@ _SPAN = re.compile(
 )
 _LCOV_DA = re.compile(r"DA:(\d+),(\d+)")
 _LCOV_BRDA = re.compile(r"BRDA:(\d+),([^,]*),([^,]*),(-|\d+)")
+# `FN:<line>,<name>`, or `FN:<start>,<end>,<name>` from LCOV 2 and coverage.py.
+_LCOV_FN = re.compile(r"FN:(\d+),(?:\d+,)?(.+)")
+_LCOV_FNDA = re.compile(r"FNDA:(\d+),(.+)")
 _DOCTYPE = re.compile(r"<!DOCTYPE[^>]*>", re.IGNORECASE)
 
 
@@ -29,12 +33,35 @@ class FileCoverage(dict):
 
     The mapping itself is `line → (covered, total)` from `DA` records, so
     existing callers can keep indexing it. `branches` aggregates each `BRDA`
-    record on that line as one branch.
+    record on that line as one branch. `calls` maps the line of each `FN`
+    record to the call count its `FNDA` record gives.
     """
 
     def __init__(self):
         super().__init__()
         self.branches: dict[int, tuple[int, int]] = {}
+        self.calls: dict[int, int] = {}
+        self._declared: dict[str, list[int]] = {}
+        self._counted: dict[str, int] = {}
+
+    def declare_function(self, line: int, name: str) -> None:
+        self._declared.setdefault(name, []).append(line)
+
+    def count_calls(self, name: str, hits: int) -> None:
+        """Pair the n-th `FNDA` for a name with the n-th `FN` of that name.
+
+        Two functions in one file can share a name. When two share a line, the
+        busier one counts, so a callback in a default argument cannot zero the
+        function it belongs to.
+        """
+
+        index = self._counted.get(name, 0)
+        self._counted[name] = index + 1
+        lines = self._declared.get(name, [])
+        if index >= len(lines):
+            return
+        line = lines[index]
+        self.calls[line] = max(self.calls.get(line, 0), hits)
 
 
 def normalize_path(path: str) -> str:
@@ -256,6 +283,14 @@ def _read_lcov_line(current: FileCoverage, line: str) -> None:
     branch = _LCOV_BRDA.match(line)
     if branch:
         _add_branch(current, int(branch.group(1)), branch.group(4))
+        return
+    declared = _LCOV_FN.match(line)
+    if declared:
+        current.declare_function(int(declared.group(1)), declared.group(2))
+        return
+    called = _LCOV_FNDA.match(line)
+    if called:
+        current.count_calls(called.group(2), int(called.group(1)))
 
 
 def parse_lcov(text: str) -> dict[str, FileCoverage]:
@@ -295,6 +330,31 @@ def branch_percent(record, start: int, end: int) -> float | None:
     if total == 0:
         return None
     return coverage_percent(covered, total)
+
+
+def _never_called(record, start: int, end: int) -> bool:
+    """Whether the outermost `FN` record in the span has zero calls.
+
+    A declaration line runs when its module loads, so line hits alone can
+    credit a function nothing called. Vitest 2's V8 provider reports it so.
+    """
+
+    calls = getattr(record, "calls", None)
+    if not calls:
+        return False
+    inside = [line for line in calls if start <= line <= end]
+    if not inside:
+        return False
+    return calls[min(inside)] == 0
+
+
+def _lcov_percent(record, start: int, end: int) -> float | None:
+    if _never_called(record, start, end):
+        return 0.0
+    branched = branch_percent(record, start, end)
+    if branched is not None:
+        return branched
+    return percent_for_range(record, start, end)
 
 
 def parse_go_profile(text: str) -> dict[str, list[tuple[int, int, int, int]]]:
@@ -463,10 +523,7 @@ class CoverageBundle:
         record = self._lcov_lines(function.path)
         if record is None:
             return None
-        branched = branch_percent(record, function.start_line, function.end_line)
-        if branched is not None:
-            return branched
-        return percent_for_range(record, function.start_line, function.end_line)
+        return _lcov_percent(record, function.start_line, function.end_line)
 
     def _html_lines(self, path: str) -> dict[int, tuple[int, int]] | None:
         return _lookup(self.form_html, path, self.source_parts)

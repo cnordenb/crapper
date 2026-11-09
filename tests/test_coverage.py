@@ -65,6 +65,80 @@ def test_a_branchless_span_keeps_line_coverage():
     assert bundle.percent_for(scored) == 50.0
 
 
+# Vitest 2.1.9's V8 provider on Windows. `unused` is never called, but its
+# declaration line ran when the module loaded.
+_VITEST_2_LCOV = """TN:
+SF:src\\grade.js
+FN:1,grade
+FN:7,unused
+FNF:2
+FNH:1
+FNDA:2,grade
+FNDA:0,unused
+DA:1,1
+DA:2,2
+DA:3,2
+DA:4,2
+DA:5,2
+DA:7,1
+DA:8,0
+DA:9,0
+LF:8
+LH:6
+BRDA:1,0,0,2
+BRDA:2,1,0,1
+BRDA:3,2,0,0
+BRDA:3,3,0,1
+BRDA:4,4,0,0
+BRF:5
+BRH:3
+end_of_record
+"""
+
+
+def _javascript(start_line, end_line, path="src/grade.js"):
+    return function(path=path, language="typescript", start_line=start_line, end_line=end_line)
+
+
+def test_a_function_lcov_says_never_ran_scores_zero():
+    parsed = parse_lcov(_VITEST_2_LCOV)
+    assert parsed["src\\grade.js"].calls == {1: 2, 7: 0}
+    bundle = CoverageBundle(lcov=parsed)
+    assert bundle.percent_for(_javascript(7, 9)) == 0.0
+    assert bundle.percent_for(_javascript(1, 5)) == 60.0
+
+
+def test_function_records_pair_by_name_in_order():
+    text = (
+        "SF:src/app.js\n"
+        "FN:1,3,handler\nFNDA:2,handler\n"
+        "FN:5,7,handler\nFNDA:0,handler\n"
+        "DA:1,1\nDA:2,1\nDA:3,1\nDA:5,1\nDA:6,0\nDA:7,0\n"
+        "end_of_record\n"
+    )
+    parsed = parse_lcov(text)
+    assert parsed["src/app.js"].calls == {1: 2, 5: 0}
+    bundle = CoverageBundle(lcov=parsed)
+    assert bundle.percent_for(_javascript(1, 3, "src/app.js")) == 100.0
+    assert bundle.percent_for(_javascript(5, 7, "src/app.js")) == 0.0
+
+
+def test_an_uncalled_callback_does_not_zero_its_function():
+    text = (
+        "SF:src/app.js\n"
+        "FN:1,outer\nFN:1,(anonymous_0)\nFN:2,(anonymous_1)\n"
+        "FNDA:1,outer\nFNDA:0,(anonymous_0)\nFNDA:0,(anonymous_1)\nFNDA:0,ghost\n"
+        "DA:1,1\nDA:2,1\nDA:3,0\nDA:4,1\n"
+        "end_of_record\n"
+    )
+    parsed = parse_lcov(text)
+    assert parsed["src/app.js"].calls == {1: 1, 2: 0}
+    bundle = CoverageBundle(lcov=parsed)
+    assert bundle.percent_for(_javascript(1, 4, "src/app.js")) == 75.0
+    assert bundle.percent_for(_javascript(2, 3, "src/app.js")) == 0.0
+    assert bundle.percent_for(_javascript(4, 4, "src/app.js")) == 100.0
+
+
 def test_go_profile_matches_crap4go_statement_ranges():
     profile = parse_go_profile(
         "mode: set\ngithub.com/acme/demo/board.go:4.1,6.2 2 1\ngithub.com/acme/demo/board.go:8.1,9.2 1 0\n"

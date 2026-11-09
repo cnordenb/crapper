@@ -1,9 +1,21 @@
 #!/bin/sh
 # Run the CRAP tool, creating a local virtualenv on first use.
 ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-PY="$ROOT/.venv/bin/python"
-if [ ! -x "$PY" ]; then
-  python3 -m venv "$ROOT/.venv"
-  "$ROOT/.venv/bin/pip" install -e "$ROOT"
+
+# A Windows virtualenv, seen from Git Bash, keeps python in Scripts.
+venv_python() {
+  for py in "$ROOT/.venv/bin/python" "$ROOT/.venv/Scripts/python.exe"; do
+    if [ -x "$py" ]; then
+      echo "$py"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! PY=$(venv_python); then
+  python3 -m venv "$ROOT/.venv" || python -m venv "$ROOT/.venv" || exit 1
+  PY=$(venv_python) || exit 1
+  "$PY" -m pip install -e "$ROOT"
 fi
 exec "$PY" -m crapper "$@"

@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -95,6 +96,8 @@ def test_project_snapshot_is_readable_as_crap4clj_edn(tmp_path):
     assert "should-skip" not in text
     assert "TestPlace" not in text
 
+    if shutil.which("bb") is None:
+        pytest.skip("bb reads the snapshot back as EDN, and it is not installed")
     reader = subprocess.run(
         [
             "bb",
@@ -378,6 +381,7 @@ def test_changed_outside_a_repository_returns_gits_status(tmp_path, capsys):
     assert captured.err.strip()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="uml is a zsh script")
 def test_uml_loader_rejects_a_missing_viewer(tmp_path):
     script = Path(__file__).resolve().parents[1] / "uml"
     completed = subprocess.run(

@@ -55,5 +55,6 @@ def render_edn(entries: list[Entry]) -> str:
 def write_metrics(entries: list[Entry], root: Path) -> Path:
     path = metrics_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_edn(entries), encoding="utf-8")
+    # LF on every platform, so a committed snapshot does not churn on Windows.
+    path.write_text(render_edn(entries), encoding="utf-8", newline="\n")
     return path

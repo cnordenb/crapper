@@ -7,6 +7,7 @@ tool, or a failed run, scores its functions at 0%.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -14,6 +15,8 @@ import sys
 from pathlib import Path
 
 from crapper.discover import is_test_file, language_of
+
+_WINDOWS = os.name == "nt"
 
 _MAVEN = [
     "mvn",
@@ -34,6 +37,23 @@ def _show(command: str | list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def _program(command: list[str]) -> list[str]:
+    """Replace a bare program name with the path PATH resolves it to.
+
+    Windows starts only an `.exe` by bare name. `npm`, `npx`, and `mvn` are
+    `.cmd` files there, and `shutil.which` finds them through PATHEXT. A name
+    with a directory, or one PATH does not have, is left as it is.
+    """
+
+    name = command[0]
+    if os.path.dirname(name):
+        return command
+    found = shutil.which(name)
+    if found is None:
+        return command
+    return [found, *command[1:]]
+
+
 def run_shell(command: str | list[str], cwd: Path) -> int:
     """Run a coverage command.
 
@@ -47,7 +67,7 @@ def run_shell(command: str | list[str], cwd: Path) -> int:
         if isinstance(command, str):
             completed = subprocess.run(command, cwd=cwd, shell=True)
         else:
-            completed = subprocess.run(list(command), cwd=cwd)
+            completed = subprocess.run(_program(list(command)), cwd=cwd)
     except OSError as exc:
         _warn(f"Coverage command failed to start: {exc}")
         return 127
@@ -70,7 +90,7 @@ def _clean_dir(path: Path) -> None:
         shutil.rmtree(path)
 
 
-_COVERAGE_DIRS = {"typescript", "rust", "go", "python"}
+_COVERAGE_DIRS = {"typescript", "rust", "go", "python", "c"}
 
 
 def _outside_language_dirs(coverage: Path, path: Path) -> bool:
@@ -258,8 +278,18 @@ def _vitest_includes(package: Path, files: list[Path]) -> list[str]:
     return includes
 
 
+_VITEST_BINARIES = {"vitest", "vitest.cmd"}
+
+
+def _vitest_binary(package: Path) -> Path:
+    """On Windows npm writes `vitest.cmd` beside `vitest`, which is a shell script there."""
+
+    name = "vitest.cmd" if _WINDOWS else "vitest"
+    return package / "node_modules" / ".bin" / name
+
+
 def _vitest_coverage_command(package: Path, files: list[Path], report_dir: Path) -> list[str]:
-    binary = package / "node_modules" / ".bin" / "vitest"
+    binary = _vitest_binary(package)
     if binary.is_file():
         command = [str(binary)]
     else:
@@ -330,12 +360,26 @@ def python_roots(root: Path, files: list[Path]) -> list[Path]:
     return sorted(found)
 
 
+_VENV_PYTHONS = (
+    ".venv/bin/python",
+    ".venv/Scripts/python.exe",
+    "venv/bin/python",
+    "venv/Scripts/python.exe",
+)
+
+
 def _python_executable(package: Path) -> str:
-    for relative in (".venv/bin/python", "venv/bin/python"):
+    """The project's virtualenv interpreter, or the one on PATH.
+
+    A Windows virtualenv keeps it in `Scripts`. Windows installs `python`;
+    its `python3` is often the Microsoft Store stub.
+    """
+
+    for relative in _VENV_PYTHONS:
         candidate = package / relative
         if candidate.is_file():
             return str(candidate)
-    return "python3"
+    return "python" if _WINDOWS else "python3"
 
 
 def uses_pytest(package: Path) -> bool:
@@ -502,7 +546,7 @@ def _cover_typescript(root: Path, files: list[Path]) -> None:
 def _needs_vitest_provider(command: list[str]) -> bool:
     if command[:3] == ["npm", "run", "coverage"]:
         return False
-    return any(Path(part).name == "vitest" for part in command)
+    return any(Path(part).name in _VITEST_BINARIES for part in command)
 
 
 def _python_kind(py: str, package: Path) -> str:
@@ -579,7 +623,22 @@ def run_coverage(root: Path, files: list[Path], command: str | None) -> int:
                 "Reports already on disk will not be read."
             )
         return code
+    _cover_languages(root, files)
+    return 0
 
+
+def _note_c_coverage() -> None:
+    """C has no standard test command, and its build must add `--coverage`."""
+
+    _warn(
+        "C tests are not run. C scores come from LCOV already under "
+        "target/coverage or coverage, such as gcovr --lcov writes from gcov data. "
+        "Pass --coverage-command to build, test, and write it. "
+        "Without a report, C scores 0%."
+    )
+
+
+def _cover_languages(root: Path, files: list[Path]) -> None:
     languages = _languages_in(files)
     if "clojure" in languages:
         _cover_clojure(root)
@@ -593,4 +652,5 @@ def run_coverage(root: Path, files: list[Path], command: str | None) -> int:
         _cover_python(root, files)
     if "rust" in languages:
         _cover_rust(root, files)
-    return 0
+    if "c" in languages:
+        _note_c_coverage()

@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from crapper.runners import (
     _ensure_python_module,
     _ensure_vitest_coverage,
     _manifest_snapshot,
+    _needs_vitest_provider,
     _prepare_report,
     _python_executable,
     _python_kind,
@@ -188,9 +190,26 @@ def test_clean_clojure_keeps_other_language_reports(tmp_path):
     (kept / "lcov.info").write_text("keep", encoding="utf-8")
     stale = tmp_path / "target" / "coverage" / "lcov.info"
     stale.write_text("old", encoding="utf-8")
+    c_report = _write(tmp_path, "target/coverage/c/lcov.info", "keep")
     _clean_clojure(tmp_path)
     assert (kept / "lcov.info").is_file()
+    assert c_report.is_file()
     assert not stale.exists()
+
+
+def test_c_coverage_is_read_from_disk_and_never_run(tmp_path, monkeypatch, capsys):
+    commands = []
+    monkeypatch.setattr("crapper.runners.run_shell", lambda command, cwd: commands.append(command) or 0)
+    report = _write(tmp_path, "target/coverage/c/lcov.info", "SF:src/grade.c\nend_of_record\n")
+    source = _write(tmp_path, "src/grade.c", "int f(void) { return 0; }\n")
+    assert run_coverage(tmp_path, [source], None) == 0
+    assert commands == []
+    assert report.is_file()
+    err = capsys.readouterr().err
+    assert "C tests are not run" in err
+    assert "Without a report, C scores 0%." in err
+    assert run_coverage(tmp_path, [_write(tmp_path, "src/app.py", "x = 1\n")], "exit 0") == 0
+    assert "C tests are not run" not in capsys.readouterr().err
 
 
 def test_python_executable_prefers_a_project_venv(tmp_path):
@@ -198,6 +217,19 @@ def test_python_executable_prefers_a_project_venv(tmp_path):
     binary.parent.mkdir(parents=True)
     binary.write_text("", encoding="utf-8")
     assert _python_executable(tmp_path) == str(binary)
+
+
+def test_python_executable_finds_a_windows_venv_before_a_plain_venv(tmp_path):
+    _write(tmp_path, "venv/bin/python", "")
+    binary = _write(tmp_path, ".venv/Scripts/python.exe", "")
+    assert _python_executable(tmp_path) == str(binary)
+
+
+def test_python_executable_without_a_venv_is_the_platform_interpreter(tmp_path, monkeypatch):
+    monkeypatch.setattr("crapper.runners._WINDOWS", False)
+    assert _python_executable(tmp_path) == "python3"
+    monkeypatch.setattr("crapper.runners._WINDOWS", True)
+    assert _python_executable(tmp_path) == "python"
 
 
 def test_rust_kind_installs_llvm_cov_when_it_is_missing(monkeypatch):
@@ -492,6 +524,7 @@ def test_an_argument_vector_is_not_a_shell(tmp_path, monkeypatch):
         return Done()
 
     monkeypatch.setattr("crapper.runners.subprocess.run", fake)
+    monkeypatch.setattr("crapper.runners.shutil.which", lambda _name: None)
     assert run_shell("exit 3", tmp_path) == 0
     marker = tmp_path / "pwned"
     assert run_shell(["true", f"a;touch {marker}"], tmp_path) == 0
@@ -502,8 +535,50 @@ def test_an_argument_vector_is_not_a_shell(tmp_path, monkeypatch):
 
 def test_an_argument_vector_cannot_run_a_second_command(tmp_path):
     marker = tmp_path / "pwned"
-    assert run_shell(["true", f"a;touch {marker}"], tmp_path) == 0
+    assert run_shell([sys.executable, "-c", "pass", f"a;touch {marker}"], tmp_path) == 0
     assert not marker.exists()
+
+
+def test_a_bare_program_name_runs_from_the_path_that_path_resolves(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    def fake(command, cwd):
+        seen.append(command)
+
+        class Done:
+            returncode = 0
+
+        return Done()
+
+    def which(name):
+        return None if name == "mvn" else f"/found/{name}.cmd"
+
+    monkeypatch.setattr("crapper.runners.subprocess.run", fake)
+    monkeypatch.setattr("crapper.runners.shutil.which", which)
+    tool = str(tmp_path / "bin" / "npm")
+    assert run_shell(["npm", "test"], tmp_path) == 0
+    assert run_shell(["mvn", "test"], tmp_path) == 0
+    assert run_shell([tool, "test"], tmp_path) == 0
+    assert seen == [["/found/npm.cmd", "test"], ["mvn", "test"], [tool, "test"]]
+    assert f"+ ({tmp_path}) npm test\n" in capsys.readouterr().err
+
+
+def test_vitest_runs_the_binary_npm_wrote_for_this_platform(tmp_path, monkeypatch):
+    _write(tmp_path, "package.json", json.dumps({"scripts": {"test": "vitest run"}}))
+    shell_script = _write(tmp_path, "node_modules/.bin/vitest", "#!/bin/sh\n")
+    shim = _write(tmp_path, "node_modules/.bin/vitest.cmd", "@echo off\n")
+    report_dir = tmp_path / "cov"
+    monkeypatch.setattr("crapper.runners._WINDOWS", False)
+    posix = typescript_command(tmp_path, [], report_dir)
+    monkeypatch.setattr("crapper.runners._WINDOWS", True)
+    windows = typescript_command(tmp_path, [], report_dir)
+    shim.unlink()
+    without_shim = typescript_command(tmp_path, [], report_dir)
+    assert posix[:2] == [str(shell_script), "run"]
+    assert windows[:2] == [str(shim), "run"]
+    assert without_shim[:3] == ["npx", "vitest", "run"]
+    assert all(_needs_vitest_provider(command) for command in (posix, windows, without_shim))
+    assert not _needs_vitest_provider(["npm", "run", "coverage"])
 
 
 def test_go_coverprofile_stays_one_argument(tmp_path, monkeypatch):

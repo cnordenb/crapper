@@ -20,6 +20,8 @@ EXTENSIONS = {
     ".cjs": "typescript",
     ".rs": "rust",
     ".py": "python",
+    ".c": "c",
+    ".h": "c",
 }
 
 SKIP_DIRS = {
@@ -40,6 +42,8 @@ SKIP_DIRS = {
     "testdata",
     "__pycache__",
     ".clj-kondo",
+    # CMake's compiler probe writes CMakeCCompilerId.c into any build directory.
+    "CMakeFiles",
 }
 
 TEST_DIRS = {"test", "tests", "spec", "specs", "__tests__"}
@@ -64,6 +68,9 @@ JS_TEST_SUFFIXES = (
     ".test.cjs",
     ".spec.cjs",
 )
+# `test_x.py` and `x_test.py`; Unity and cmocka name C tests the same way.
+UNIT_TEST_EXTENSIONS = (".py", ".c")
+UNIT_TEST_SUFFIXES = tuple(f"_test{extension}" for extension in UNIT_TEST_EXTENSIONS)
 
 
 def language_of(path: str | Path) -> str | None:
@@ -85,7 +92,9 @@ def is_test_file(path: str | Path) -> bool:
         return True
     if name == "conftest.py":
         return True
-    if name.endswith("_test.py") or (name.startswith("test_") and name.endswith(".py")):
+    if name.endswith(UNIT_TEST_SUFFIXES) or (
+        name.startswith("test_") and name.endswith(UNIT_TEST_EXTENSIONS)
+    ):
         return True
     return any(part in TEST_DIRS for part in file_path.parts)
 

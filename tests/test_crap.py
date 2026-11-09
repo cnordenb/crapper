@@ -91,6 +91,15 @@ def test_metrics_directory_can_be_written_twice(tmp_path):
     assert first.is_file()
 
 
+def test_metrics_file_has_the_same_bytes_on_every_platform(tmp_path):
+    from crapper.metrics import write_metrics
+
+    rows = [entry(), entry(name="other")]
+    written = write_metrics(rows, tmp_path).read_bytes()
+    assert written == render_edn(rows).encode("utf-8")
+    assert b"\r" not in written
+
+
 def test_edn_writes_nil_for_missing_coverage():
     text = render_edn([entry(coverage=None, crap=None)])
     assert ":coverage nil" in text
